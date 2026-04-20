@@ -662,17 +662,16 @@ const LESSONS = [
   },
 ];
 
+
 const DEFAULT_STATE = {
-  mode: 'sem-codar',
-  completedLessons: {},
-  lessonResponses: {},
-  codeResponses: {},
-  openResponses: {},
-  quizResponses: {},
-  reviewStatus: {},
-  reviewAnswers: {},
+  flowStep: 'intro',
+  mode: null,
+  currentLessonId: LESSONS[0].id,
+  lastVisitedLessonId: null,
+  lessonSearch: '',
   notes: '',
-  search: '',
+  completedLessons: {},
+  lessonProgress: {},
 };
 
 function loadState() {
@@ -687,15 +686,75 @@ function loadState() {
 function evaluateKeywords(text, keywords = []) {
   const normalized = String(text || '').toLowerCase();
   const hits = keywords.filter((keyword) => normalized.includes(keyword.toLowerCase())).length;
-  return hits >= Math.max(1, Math.ceil(keywords.length / 2));
+  return {
+    passed: hits >= Math.max(1, Math.ceil(keywords.length / 2)),
+    hits,
+    normalized,
+  };
+}
+
+function getLessonProgress(state, lessonId) {
+  return state.lessonProgress[lessonId] || {
+    status: 'not-started',
+    answerText: '',
+    answerLocked: false,
+    answerFeedback: '',
+    answerPassed: false,
+    quiz: {},
+    codeText: '',
+  };
+}
+
+function getUnlockedOrder(state) {
+  let nextOrder = 1;
+  for (const lesson of LESSONS) {
+    if (state.completedLessons[lesson.id]) nextOrder = lesson.order + 1;
+    else break;
+  }
+  return Math.min(nextOrder, LESSONS.length);
+}
+
+function getUnlockedLevel(state) {
+  let current = 1;
+  for (const level of LEVELS) {
+    const lessons = LESSONS.filter((lesson) => lesson.level === level.id);
+    const allDone = lessons.every((lesson) => state.completedLessons[lesson.id]);
+    if (allDone && current === level.id) current += 1;
+    else break;
+  }
+  return Math.min(current, LEVELS.length);
+}
+
+function buildAnswerKeywords(lesson) {
+  const reviewKeywords = lesson.review.flatMap((item) => item.keywords);
+  const titleKeywords = lesson.title.toLowerCase().split(/[ ,/]+/).filter((item) => item.length > 4);
+  return [...new Set([...reviewKeywords, ...titleKeywords])];
+}
+
+function analyzeAnswer(lesson, answer) {
+  const keywords = buildAnswerKeywords(lesson);
+  const result = evaluateKeywords(answer, keywords);
+  const missing = keywords.filter((keyword) => !result.normalized.includes(keyword.toLowerCase())).slice(0, 4);
+
+  if (result.passed) {
+    return {
+      passed: true,
+      message: missing.length
+        ? `Boa resposta. Você mostrou entendimento suficiente desta aula. Para deixar sua visão ainda mais forte, também vale reforçar: ${missing.join(', ')}.`
+        : 'Boa resposta. Você demonstrou entendimento claro dos pontos centrais desta aula.',
+    };
+  }
+
+  return {
+    passed: false,
+    message: `Sua resposta ainda não mostrou com clareza os pontos principais. Releia a aula, pesquise se for necessário e volte para responder melhor. Foque em: ${missing.join(', ') || 'fluxo, objetivo e aplicação prática'}.`,
+  };
 }
 
 function App() {
   const [state, setState] = useState(loadState);
-  const [activeTab, setActiveTab] = useState('apresentacao');
-  const [selectedLessonId, setSelectedLessonId] = useState(LESSONS[0].id);
-  const [reviewDraft, setReviewDraft] = useState({});
   const [installPrompt, setInstallPrompt] = useState(null);
+  const [celebration, setCelebration] = useState(null);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -710,98 +769,157 @@ function App() {
     return () => window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
   }, []);
 
-  const selectedLesson = LESSONS.find((lesson) => lesson.id === selectedLessonId) || LESSONS[0];
+  const unlockedOrder = useMemo(() => getUnlockedOrder(state), [state]);
+  const unlockedLevel = useMemo(() => getUnlockedLevel(state), [state]);
+  const currentLesson = LESSONS.find((lesson) => lesson.id === state.currentLessonId) || LESSONS[0];
+  const currentLessonProgress = getLessonProgress(state, currentLesson.id);
 
-  const levelCompletion = useMemo(() => {
+  const filteredLessons = useMemo(() => {
+    const search = state.lessonSearch.trim().toLowerCase();
+    const list = search
+      ? LESSONS.filter((lesson) => [lesson.title, lesson.block, LEVELS.find((l) => l.id === lesson.level)?.name || '']
+          .join(' ')
+          .toLowerCase()
+          .includes(search))
+      : LESSONS;
+    return list;
+  }, [state.lessonSearch]);
+
+  const levelProgress = useMemo(() => {
     return LEVELS.map((level) => {
       const lessons = LESSONS.filter((lesson) => lesson.level === level.id);
       const done = lessons.filter((lesson) => state.completedLessons[lesson.id]).length;
       return {
         ...level,
-        total: lessons.length,
         done,
+        total: lessons.length,
         percent: lessons.length ? Math.round((done / lessons.length) * 100) : 0,
       };
     });
   }, [state.completedLessons]);
 
-  const unlockedLevel = useMemo(() => {
-    let current = 1;
-    for (const level of levelCompletion) {
-      if (level.id === current && level.percent === 100) current += 1;
-      else break;
-    }
-    return Math.min(current, 5);
-  }, [levelCompletion]);
-
-  const filteredLessons = useMemo(() => {
-    const search = state.search.trim().toLowerCase();
-    if (!search) return LESSONS;
-    return LESSONS.filter((lesson) => {
-      return [lesson.title, lesson.block, lesson.objective, lesson.level]
-        .join(' ')
-        .toLowerCase()
-        .includes(search);
-    });
-  }, [state.search]);
-
-  const pendingReview = getPendingReview(selectedLesson, state);
-
-  function updateState(partial) {
-    setState((current) => ({ ...current, ...partial }));
+  function patchState(patch) {
+    setState((current) => ({ ...current, ...patch }));
   }
 
-  function saveTextResponse(type, lessonId, value) {
-    const key = type === 'code' ? 'codeResponses' : type === 'open' ? 'openResponses' : 'lessonResponses';
-    updateState({
-      [key]: {
-        ...state[key],
-        [lessonId]: value,
-      },
-    });
-  }
-
-  function saveQuizAnswer(lessonId, questionIndex, optionIndex) {
-    updateState({
-      quizResponses: {
-        ...state.quizResponses,
+  function patchLessonProgress(lessonId, patch) {
+    setState((current) => ({
+      ...current,
+      lessonProgress: {
+        ...current.lessonProgress,
         [lessonId]: {
-          ...(state.quizResponses[lessonId] || {}),
-          [questionIndex]: optionIndex,
+          ...getLessonProgress(current, lessonId),
+          ...patch,
+        },
+      },
+    }));
+  }
+
+  function openLesson(lesson) {
+    const locked = lesson.order > unlockedOrder || lesson.level > unlockedLevel;
+    if (locked) return;
+
+    const progress = getLessonProgress(state, lesson.id);
+    patchState({
+      flowStep: 'lesson',
+      currentLessonId: lesson.id,
+      lastVisitedLessonId: lesson.id,
+      lessonProgress: {
+        ...state.lessonProgress,
+        [lesson.id]: {
+          ...progress,
+          status: state.completedLessons[lesson.id] ? 'done' : 'in-progress',
         },
       },
     });
   }
 
-  function completeLesson(lesson) {
-    updateState({
-      completedLessons: {
-        ...state.completedLessons,
-        [lesson.id]: true,
-      },
+  function verifyOpenAnswer() {
+    const progress = getLessonProgress(state, currentLesson.id);
+    const analysis = analyzeAnswer(currentLesson, progress.answerText);
+    patchLessonProgress(currentLesson.id, {
+      answerFeedback: analysis.message,
+      answerLocked: analysis.passed,
+      answerPassed: analysis.passed,
+      status: analysis.passed ? progress.status : 'in-progress',
     });
   }
 
-  function submitReview() {
-    if (!pendingReview) return;
-    const lesson = LESSONS.find((item) => item.id === pendingReview.id);
-    let correct = 0;
-    lesson.review.forEach((question, index) => {
-      const answer = reviewDraft[index] || '';
-      if (evaluateKeywords(answer, question.keywords)) correct += 1;
-    });
-    const passed = correct >= Math.ceil(lesson.review.length / 2);
-    updateState({
-      reviewStatus: {
-        ...state.reviewStatus,
-        [lesson.id]: passed ? 'passed' : 'retry',
+  function answerQuiz(questionIndex, optionIndex) {
+    const progress = getLessonProgress(state, currentLesson.id);
+    const question = currentLesson.quiz[questionIndex];
+    const isCorrect = question.answer === optionIndex;
+
+    patchLessonProgress(currentLesson.id, {
+      quiz: {
+        ...progress.quiz,
+        [questionIndex]: {
+          selected: optionIndex,
+          locked: isCorrect,
+          correct: isCorrect,
+          message: isCorrect
+            ? 'Resposta correta. Esta pergunta foi concluída.'
+            : 'Resposta incorreta. Releia a aula, pesquise se for necessário e tente novamente.',
+        },
       },
-      reviewAnswers: {
-        ...state.reviewAnswers,
-        [lesson.id]: reviewDraft,
-      },
+      status: 'in-progress',
     });
-    if (passed) setReviewDraft({});
+  }
+
+  function saveCode(value) {
+    patchLessonProgress(currentLesson.id, { codeText: value, status: 'in-progress' });
+  }
+
+  function allQuizCorrect(lessonId) {
+    const progress = getLessonProgress(state, lessonId);
+    return currentLesson.id === lessonId
+      ? currentLesson.quiz.every((_, index) => progress.quiz[index]?.locked)
+      : (LESSONS.find((lesson) => lesson.id === lessonId)?.quiz || []).every((_, index) => progress.quiz[index]?.locked);
+  }
+
+  function finishLesson() {
+    const lesson = currentLesson;
+    const nextLesson = LESSONS.find((item) => item.order === lesson.order + 1);
+    const justFinishedLevel = LEVELS.find((level) => level.id === lesson.level);
+    const levelLessons = LESSONS.filter((item) => item.level === lesson.level);
+    const willCompleteLevel = levelLessons.every((item) => item.id === lesson.id || state.completedLessons[item.id]);
+    const willFinishAll = LESSONS.every((item) => item.id === lesson.id || state.completedLessons[item.id]);
+
+    setState((current) => ({
+      ...current,
+      completedLessons: {
+        ...current.completedLessons,
+        [lesson.id]: true,
+      },
+      lessonProgress: {
+        ...current.lessonProgress,
+        [lesson.id]: {
+          ...getLessonProgress(current, lesson.id),
+          status: 'done',
+        },
+      },
+      lastVisitedLessonId: nextLesson ? nextLesson.id : lesson.id,
+      currentLessonId: nextLesson ? nextLesson.id : lesson.id,
+      flowStep: nextLesson ? 'lesson' : 'lessons',
+    }));
+
+    if (willFinishAll) {
+      setCelebration({
+        title: 'PARABÉNS! VOCÊ FINALIZOU TODAS AS AULAS',
+        text: 'Você concluiu toda a trilha da DevAcademy ADS. Agora sua base está muito mais madura e organizada.',
+      });
+      return;
+    }
+
+    if (willCompleteLevel) {
+      const nextLevel = LEVELS.find((level) => level.id === justFinishedLevel.id + 1);
+      setCelebration({
+        title: 'PARABÉNS, VOCÊ AVANÇOU PARA UM NOVO NÍVEL',
+        text: nextLevel
+          ? `Você finalizou o nível ${justFinishedLevel.name} e desbloqueou o nível ${nextLevel.name}.`
+          : `Você finalizou o nível ${justFinishedLevel.name}.`,
+      });
+    }
   }
 
   async function installApp() {
@@ -811,340 +929,283 @@ function App() {
     setInstallPrompt(null);
   }
 
+  const canFinishLesson = currentLessonProgress.answerLocked && allQuizCorrect(currentLesson.id);
+
   return (
-    <div className="app-shell">
-      <header className="topbar">
+    <div className="app-shell minimal-shell">
+      <header className="topbar compact-topbar">
         <div>
           <p className="eyebrow">DevAcademy ADS</p>
           <h1>Ferramenta real de estudo em ADS</h1>
-          <p className="subtitle">Leve, instalável, com progresso salvo e foco em estudo sério no celular e no PC.</p>
+          <p className="subtitle">Fluxo simples, progresso salvo e foco em estudo sério no celular e no PC.</p>
         </div>
         <div className="topbar-actions">
-          <button className="secondary-btn" onClick={() => updateState({ mode: state.mode === 'sem-codar' ? 'com-codar' : 'sem-codar' })}>
-            Modo atual: {state.mode === 'sem-codar' ? 'Estudar sem codar' : 'Estudar e codar'}
-          </button>
+          {state.mode && <span className="pill-label">Modo atual: {state.mode === 'sem-codar' ? 'Estudar sem codar' : 'Estudar e codar'}</span>}
           {installPrompt && (
-            <button className="primary-btn" onClick={installApp}>
-              Instalar app
-            </button>
+            <button className="secondary-btn" onClick={installApp}>Instalar app</button>
           )}
         </div>
       </header>
 
-      <nav className="main-tabs">
-        {[
-          ['apresentacao', 'Apresentação'],
-          ['matriz', 'Matriz ADS'],
-          ['sem-codar', 'Estudar sem codar'],
-          ['com-codar', 'Estudar e codar'],
-          ['niveis', 'Níveis'],
-          ['anotacoes', 'Anotações'],
-        ].map(([id, label]) => (
-          <button key={id} className={activeTab === id ? 'tab-btn active' : 'tab-btn'} onClick={() => setActiveTab(id)}>
-            {label}
-          </button>
-        ))}
-      </nav>
+      {celebration && (
+        <div className="celebration-overlay" onClick={() => setCelebration(null)}>
+          <div className="celebration-card" onClick={(e) => e.stopPropagation()}>
+            <h2>{celebration.title}</h2>
+            <p>{celebration.text}</p>
+            <button className="primary-btn" onClick={() => setCelebration(null)}>Continuar</button>
+          </div>
+        </div>
+      )}
 
-      <main className="content-grid">
-        {activeTab === 'apresentacao' && (
-          <section className="page-section">
-            <div className="hero-grid">
-              <Card title="O que é este app">
-                <p>O DevAcademy ADS foi pensado para estudo real de Análise e Desenvolvimento de Sistemas, com uso rápido no celular e apoio prático no PC.</p>
-              </Card>
-              <Card title="Para que ele serve">
-                <p>Serve para formar raciocínio técnico e profissional: entender problema, estruturar solução, revisar conteúdo, praticar quando possível e evoluir por níveis.</p>
-              </Card>
-              <Card title="Como o estudo está organizado">
-                <p>O conteúdo avança por aulas, blocos de ADS e níveis. Cada aula tem objetivo, explicação, exemplos, exercício, mini projeto, pergunta aberta, quiz e pensamento profissional.</p>
-              </Card>
-              <Card title="Como funciona a progressão">
-                <p>Você conclui aulas, faz revisão obrigatória da aula anterior antes de avançar e desbloqueia níveis somente ao completar 100% do nível atual.</p>
-              </Card>
-              <Card title="Uso no celular">
-                <p>O modo sem codar foi feito para fim de semana, deslocamento e momentos sem PC. O foco é entendimento, revisão, reflexão e resposta escrita.</p>
-              </Card>
-              <Card title="Uso no PC">
-                <p>O modo estudar e codar adiciona exemplo de código, espaço para colar solução e guia mais voltado para prática, sem depender de compilador interno pesado.</p>
-              </Card>
-            </div>
-
-            <div className="two-col-blocks">
-              <Card title="Diferença entre os modos">
-                <ul className="clean-list">
-                  <li><strong>Estudar sem codar:</strong> leitura, analogia, revisão, resposta escrita e raciocínio.</li>
-                  <li><strong>Estudar e codar:</strong> mesma base, mas com exemplos de código, exercício prático e espaço para colar solução.</li>
-                </ul>
-              </Card>
-              <Card title="O que este app evita">
-                <ul className="clean-list">
-                  <li>Sem login obrigatório</li>
-                  <li>Sem backend obrigatório</li>
-                  <li>Sem IA externa obrigatória</li>
-                  <li>Sem poluição visual</li>
-                  <li>Sem recursos pesados desnecessários</li>
-                </ul>
-              </Card>
-            </div>
+      <main className="single-flow">
+        {state.flowStep === 'intro' && (
+          <section className="page-section narrow-section">
+            <Card title="Apresentação">
+              <p>O DevAcademy ADS foi feito para estudo sério de ADS, principalmente no celular, com foco em entendimento real, evolução por níveis e continuidade de progresso.</p>
+              <p>Você começa entendendo a base, escolhe o modo de estudo e avança aula por aula sem poluição visual.</p>
+              <div className="intro-points">
+                <div><strong>Estudar sem codar</strong><span>Para celular, revisão, leitura, raciocínio e resposta escrita.</span></div>
+                <div><strong>Estudar e codar</strong><span>Para PC ou prática, com espaço para código e treino mais aplicado.</span></div>
+                <div><strong>Progressão clara</strong><span>Aulas concluídas recebem ✅, aula em andamento mostra Continue e as próximas ficam bloqueadas com 🔒.</span></div>
+              </div>
+              <div className="inline-actions">
+                <button className="primary-btn" onClick={() => patchState({ flowStep: 'mode' })}>Próximo</button>
+              </div>
+            </Card>
           </section>
         )}
 
-        {activeTab === 'matriz' && (
+        {state.flowStep === 'mode' && (
+          <section className="page-section narrow-section">
+            <Card title="Escolha como deseja estudar">
+              <div className="mode-choice-grid">
+                <button className="mode-choice" onClick={() => patchState({ mode: 'sem-codar', flowStep: 'lessons' })}>
+                  <strong>Estudar sem codar</strong>
+                  <span>Ideal para celular, fim de semana e momentos sem PC.</span>
+                </button>
+                <button className="mode-choice" onClick={() => patchState({ mode: 'com-codar', flowStep: 'lessons' })}>
+                  <strong>Estudar e codar</strong>
+                  <span>Ideal para prática no PC, com espaço para código e exercício aplicado.</span>
+                </button>
+              </div>
+              <div className="inline-actions">
+                <button className="secondary-btn" onClick={() => patchState({ flowStep: 'intro' })}>Voltar</button>
+              </div>
+            </Card>
+          </section>
+        )}
+
+        {state.flowStep === 'lessons' && (
           <section className="page-section">
-            <div className="section-header">
-              <h2>Matriz ADS completa</h2>
-              <p>Visão organizada do que normalmente aparece em uma formação de ADS e por que isso importa na prática.</p>
+            <div className="lessons-toolbar">
+              <div>
+                <h2>Aulas</h2>
+                <p>Conclua em ordem. A próxima aula só libera após a anterior ser concluída.</p>
+              </div>
+              <div className="toolbar-actions">
+                <button className="secondary-btn" onClick={() => patchState({ flowStep: 'mode' })}>Trocar modo</button>
+              </div>
             </div>
-            <div className="stack-grid">
-              {MATRIX_BLOCKS.map((block) => (
-                <Card key={block.title} title={block.title}>
-                  <p><strong>Conteúdos:</strong> {block.items.join(', ')}.</p>
-                  <p><strong>Na prática:</strong> {block.practical}</p>
-                </Card>
+
+            <div className="search-box compact-search">
+              <label htmlFor="lesson-search">Buscar aula</label>
+              <input
+                id="lesson-search"
+                value={state.lessonSearch}
+                onChange={(e) => patchState({ lessonSearch: e.target.value })}
+                placeholder="Ex.: banco, lógica, segurança"
+              />
+            </div>
+
+            <div className="progress-summary-card">
+              <div>
+                <strong>Progresso geral</strong>
+                <p>{Object.keys(state.completedLessons).length} / {LESSONS.length} aulas concluídas</p>
+              </div>
+              <div className="progress-bar"><span style={{ width: `${Math.round((Object.keys(state.completedLessons).length / LESSONS.length) * 100)}%` }} /></div>
+            </div>
+
+            <div className="level-chip-row">
+              {levelProgress.map((level) => (
+                <span key={level.id} className={level.id <= unlockedLevel ? 'level-chip active' : 'level-chip'}>
+                  {level.name} · {level.done}/{level.total}
+                </span>
               ))}
             </div>
 
-            <div className="two-col-blocks">
-              <Card title="Outras matérias comuns">
-                <p>{EXTRA_SUBJECTS.join(', ')}.</p>
-              </Card>
-              <Card title="Fases do curso">
-                {COURSE_PHASES.map((phase) => (
-                  <div key={phase.title} className="phase-block">
-                    <strong>{phase.title}</strong>
-                    <p>{phase.items.join(', ')}.</p>
-                  </div>
-                ))}
-              </Card>
-            </div>
-          </section>
-        )}
+            <div className="lesson-list clean-lesson-list">
+              {filteredLessons.map((lesson) => {
+                const progress = getLessonProgress(state, lesson.id);
+                const done = !!state.completedLessons[lesson.id];
+                const inProgress = !done && state.lastVisitedLessonId === lesson.id;
+                const locked = lesson.order > unlockedOrder || lesson.level > unlockedLevel;
 
-        {(activeTab === 'sem-codar' || activeTab === 'com-codar') && (
-          <section className="study-layout">
-            <aside className="sidebar">
-              <div className="search-box">
-                <label htmlFor="search">Buscar aula</label>
-                <input
-                  id="search"
-                  value={state.search}
-                  onChange={(e) => updateState({ search: e.target.value })}
-                  placeholder="Ex.: banco, lógica, segurança"
-                />
-              </div>
-              <div className="progress-box">
-                <strong>Progresso geral</strong>
-                <p>{Object.keys(state.completedLessons).length} / {LESSONS.length} aulas concluídas</p>
-                <div className="progress-bar"><span style={{ width: `${Math.round((Object.keys(state.completedLessons).length / LESSONS.length) * 100)}%` }} /></div>
-              </div>
-              <div className="lesson-list">
-                {filteredLessons.map((lesson) => {
-                  const locked = lesson.level > unlockedLevel;
-                  const selected = lesson.id === selectedLessonId;
-                  return (
-                    <button
-                      key={lesson.id}
-                      className={selected ? 'lesson-item active' : 'lesson-item'}
-                      onClick={() => setSelectedLessonId(lesson.id)}
-                    >
-                      <span>{lesson.order}. {lesson.title}</span>
-                      <small>
-                        Nível {lesson.level} · {locked ? 'Bloqueada' : state.completedLessons[lesson.id] ? 'Concluída' : 'Disponível'}
-                      </small>
-                    </button>
-                  );
-                })}
-              </div>
-            </aside>
-
-            <div className="lesson-panel">
-              {selectedLesson.level > unlockedLevel ? (
-                <Card title="Aula bloqueada">
-                  <p>Essa aula pertence a um nível ainda não liberado. Complete 100% do nível atual para avançar.</p>
-                </Card>
-              ) : (
-                <>
-                  <div className="lesson-header">
-                    <div>
-                      <p className="eyebrow">{activeTab === 'sem-codar' ? 'Modo: estudar sem codar' : 'Modo: estudar e codar'}</p>
-                      <h2>{selectedLesson.title}</h2>
-                      <p>{selectedLesson.objective}</p>
-                    </div>
-                    <button className="primary-btn" onClick={() => completeLesson(selectedLesson)}>
-                      {state.completedLessons[selectedLesson.id] ? 'Aula concluída' : 'Concluir aula'}
-                    </button>
-                  </div>
-
-                  {pendingReview && state.completedLessons[pendingReview.id] && (
-                    <Card title={`Revisão obrigatória antes de avançar: ${pendingReview.title}`} tone={state.reviewStatus[pendingReview.id] === 'retry' ? 'warning' : 'default'}>
-                      <p>Para consolidar memória, responda à revisão da aula anterior antes de seguir com tranquilidade.</p>
-                      {pendingReview.review.map((question, index) => (
-                        <div key={index} className="field-block">
-                          <label>{question.question}</label>
-                          <textarea
-                            value={reviewDraft[index] || ''}
-                            onChange={(e) => setReviewDraft((current) => ({ ...current, [index]: e.target.value }))}
-                            rows={3}
-                            placeholder="Responda com suas palavras"
-                          />
-                        </div>
-                      ))}
-                      <div className="inline-actions">
-                        <button className="primary-btn" onClick={submitReview}>Enviar revisão</button>
-                        {state.reviewStatus[pendingReview.id] === 'retry' && (
-                          <p className="feedback warning-text">Ainda faltou firmeza em algumas ideias. Releia os pontos centrais da aula anterior e tente novamente.</p>
-                        )}
-                        {state.reviewStatus[pendingReview.id] === 'passed' && (
-                          <p className="feedback success-text">Revisão aprovada. A memória da aula anterior foi reforçada.</p>
-                        )}
-                      </div>
-                    </Card>
-                  )}
-
-                  <Card title="Explicação detalhada">
-                    {selectedLesson.explanation.map((item) => <p key={item}>{item}</p>)}
-                  </Card>
-
-                  <Card title="Exemplos práticos">
-                    <ul className="clean-list">{selectedLesson.examples.map((item) => <li key={item}>{item}</li>)}</ul>
-                  </Card>
-
-                  <Card title="Guia passo a passo">
-                    <ol className="number-list">{selectedLesson.steps.map((item) => <li key={item}>{item}</li>)}</ol>
-                  </Card>
-
-                  <div className="two-col-blocks">
-                    <Card title="Exercício">
-                      <p>{selectedLesson.exercise}</p>
-                    </Card>
-                    <Card title="Mini projeto">
-                      <p>{selectedLesson.miniProject}</p>
-                    </Card>
-                  </div>
-
-                  <Card title="Pergunta aberta">
-                    <p>{selectedLesson.openQuestion}</p>
-                    <textarea
-                      rows={4}
-                      value={state.openResponses[selectedLesson.id] || ''}
-                      onChange={(e) => saveTextResponse('open', selectedLesson.id, e.target.value)}
-                      placeholder="Responda com suas palavras"
-                    />
-                  </Card>
-
-                  <Card title="Quiz rápido">
-                    <div className="quiz-stack">
-                      {selectedLesson.quiz.map((question, questionIndex) => (
-                        <div key={question.question} className="quiz-item">
-                          <strong>{question.question}</strong>
-                          <div className="option-stack">
-                            {question.options.map((option, optionIndex) => {
-                              const chosen = state.quizResponses[selectedLesson.id]?.[questionIndex] === optionIndex;
-                              const correct = question.answer === optionIndex;
-                              return (
-                                <button
-                                  key={option}
-                                  className={chosen ? 'option-btn selected' : 'option-btn'}
-                                  onClick={() => saveQuizAnswer(selectedLesson.id, questionIndex, optionIndex)}
-                                >
-                                  {option}
-                                  {chosen && <span>{correct ? ' · correta' : ' · marcada'}</span>}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </Card>
-
-                  <Card title="Pensamento profissional">
-                    <p>{selectedLesson.professionalThinking}</p>
-                  </Card>
-
-                  <Card title="Campo de resposta">
-                    <textarea
-                      rows={5}
-                      value={state.lessonResponses[selectedLesson.id] || ''}
-                      onChange={(e) => saveTextResponse('study', selectedLesson.id, e.target.value)}
-                      placeholder="Anote seu entendimento, dúvidas e resumo da aula"
-                    />
-                  </Card>
-
-                  {activeTab === 'com-codar' && (
-                    <>
-                      <Card title="Guia prático de código">
-                        <p>{selectedLesson.codePrompt}</p>
-                        <p><strong>Checklist mínimo:</strong> {selectedLesson.codeChecklist.join(', ')}.</p>
-                      </Card>
-                      <Card title="Campo de código">
-                        <textarea
-                          className="code-area"
-                          rows={10}
-                          value={state.codeResponses[selectedLesson.id] || ''}
-                          onChange={(e) => saveTextResponse('code', selectedLesson.id, e.target.value)}
-                          placeholder="Cole aqui seu código, pseudocódigo ou estrutura de solução"
-                        />
-                        <SimpleCodeEvaluation lesson={selectedLesson} code={state.codeResponses[selectedLesson.id] || ''} />
-                      </Card>
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          </section>
-        )}
-
-        {activeTab === 'niveis' && (
-          <section className="page-section">
-            <div className="section-header">
-              <h2>Progressão por níveis</h2>
-              <p>O próximo nível só é liberado quando o atual estiver 100% concluído.</p>
-            </div>
-            <div className="stack-grid">
-              {levelCompletion.map((level) => {
-                const locked = level.id > unlockedLevel;
                 return (
-                  <Card key={level.id} title={`Nível ${level.id} — ${level.name}`} tone={locked ? 'muted' : 'default'}>
-                    <p>{level.focus}</p>
-                    <p><strong>Progresso:</strong> {level.done}/{level.total} aulas · {level.percent}%</p>
-                    <div className="progress-bar"><span style={{ width: `${level.percent}%` }} /></div>
-                    <p><strong>Status:</strong> {locked ? 'Bloqueado' : level.percent === 100 ? 'Concluído' : 'Em andamento'}</p>
-                  </Card>
+                  <button
+                    key={lesson.id}
+                    className={`lesson-row ${done ? 'done' : ''} ${locked ? 'locked' : ''} ${inProgress ? 'in-progress' : ''}`}
+                    onClick={() => openLesson(lesson)}
+                    disabled={locked}
+                  >
+                    <div className="lesson-row-main">
+                      <span className="lesson-row-title">{lesson.order}. {lesson.title}</span>
+                      <span className="lesson-row-meta">Nível {lesson.level} · {LEVELS.find((item) => item.id === lesson.level)?.name}</span>
+                    </div>
+                    <div className="lesson-row-status">
+                      {done && <span className="status-badge success">✅ Concluída</span>}
+                      {inProgress && <span className="status-badge continue">Continue</span>}
+                      {locked && <span className="status-badge locked">🔒 Bloqueada</span>}
+                      {!done && !inProgress && !locked && <span className="status-badge available">Disponível</span>}
+                    </div>
+                  </button>
                 );
               })}
             </div>
           </section>
         )}
 
-        {activeTab === 'anotacoes' && (
-          <section className="page-section">
-            <div className="section-header">
-              <h2>Anotações</h2>
-              <p>Use para registrar dúvidas, erros, resumos e ideias. Tudo salvo localmente.</p>
+        {state.flowStep === 'lesson' && (
+          <section className="page-section lesson-page">
+            <div className="lesson-header-card">
+              <button className="back-link" onClick={() => patchState({ flowStep: 'lessons', lastVisitedLessonId: currentLesson.id })}>← Voltar para aulas</button>
+              <div className="lesson-header-row">
+                <div>
+                  <p className="eyebrow">Nível {currentLesson.level} · {currentLesson.block}</p>
+                  <h2>{currentLesson.order}. {currentLesson.title}</h2>
+                  <p>{currentLesson.objective}</p>
+                </div>
+                <span className="status-badge continue">{state.mode === 'sem-codar' ? 'Sem codar' : 'Estudar e codar'}</span>
+              </div>
             </div>
-            <Card title="Bloco de notas pessoal">
+
+            <Card title="Explicação da aula">
+              {currentLesson.explanation.map((item) => <p key={item}>{item}</p>)}
+            </Card>
+
+            <div className="two-col-blocks responsive-two-col">
+              <Card title="Exemplos práticos">
+                <ul className="clean-list">{currentLesson.examples.map((item) => <li key={item}>{item}</li>)}</ul>
+              </Card>
+              <Card title="Como pensar nisso">
+                <ol className="number-list">{currentLesson.steps.map((item) => <li key={item}>{item}</li>)}</ol>
+              </Card>
+            </div>
+
+            <div className="two-col-blocks responsive-two-col">
+              <Card title="Exercício">
+                <p>{currentLesson.exercise}</p>
+              </Card>
+              <Card title="Mini projeto">
+                <p>{currentLesson.miniProject}</p>
+              </Card>
+            </div>
+
+            <Card title="Pergunta principal da aula">
+              <p>{currentLesson.openQuestion}</p>
               <textarea
-                rows={16}
+                rows={6}
+                value={currentLessonProgress.answerText}
+                disabled={currentLessonProgress.answerLocked}
+                onChange={(e) => patchLessonProgress(currentLesson.id, { answerText: e.target.value, status: 'in-progress' })}
+                placeholder="Responda com suas palavras. Se for necessário, pesquise sobre o tema e volte aqui para responder."
+              />
+              <div className="inline-actions wrap-actions">
+                <button className="primary-btn" onClick={verifyOpenAnswer} disabled={currentLessonProgress.answerLocked || !currentLessonProgress.answerText.trim()}>
+                  Verificar resposta
+                </button>
+                {currentLessonProgress.answerLocked && <span className="status-badge success">Resposta certa</span>}
+              </div>
+              {currentLessonProgress.answerFeedback && (
+                <p className={`feedback ${currentLessonProgress.answerPassed ? 'success-text' : 'warning-text'}`}>
+                  {currentLessonProgress.answerFeedback}
+                </p>
+              )}
+            </Card>
+
+            <Card title="Quiz rápido">
+              <div className="quiz-stack">
+                {currentLesson.quiz.map((question, questionIndex) => {
+                  const quizState = currentLessonProgress.quiz[questionIndex] || {};
+                  return (
+                    <div key={question.question} className="quiz-item">
+                      <strong>{question.question}</strong>
+                      <div className="option-stack">
+                        {question.options.map((option, optionIndex) => {
+                          const isSelected = quizState.selected === optionIndex;
+                          const isLocked = quizState.locked;
+                          const isCorrectOption = question.answer === optionIndex;
+                          const classNames = [
+                            'option-btn',
+                            isSelected ? 'selected' : '',
+                            isLocked && isCorrectOption ? 'correct' : '',
+                          ].join(' ').trim();
+
+                          return (
+                            <button
+                              key={option}
+                              className={classNames}
+                              onClick={() => answerQuiz(questionIndex, optionIndex)}
+                              disabled={isLocked}
+                            >
+                              {option}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {quizState.message && (
+                        <p className={`feedback ${quizState.correct ? 'success-text' : 'warning-text'}`}>{quizState.message}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+
+            <Card title="Pensamento profissional">
+              <p>{currentLesson.professionalThinking}</p>
+            </Card>
+
+            {state.mode === 'com-codar' && (
+              <>
+                <Card title="Prática de código (opcional)">
+                  <p>{currentLesson.codePrompt}</p>
+                  <p><strong>Checklist base:</strong> {currentLesson.codeChecklist.join(', ')}.</p>
+                </Card>
+                <Card title="Campo de código">
+                  <textarea
+                    className="code-area"
+                    rows={10}
+                    value={currentLessonProgress.codeText}
+                    onChange={(e) => saveCode(e.target.value)}
+                    placeholder="Cole aqui seu código, pseudocódigo ou estrutura da solução."
+                  />
+                  <SimpleCodeEvaluation lesson={currentLesson} code={currentLessonProgress.codeText || ''} />
+                </Card>
+              </>
+            )}
+
+            <Card title="Anotações rápidas desta aula">
+              <textarea
+                rows={4}
                 value={state.notes}
-                onChange={(e) => updateState({ notes: e.target.value })}
-                placeholder="Escreva aqui seus resumos, dúvidas, erros encontrados, ideias de projeto e revisões pessoais."
+                onChange={(e) => patchState({ notes: e.target.value })}
+                placeholder="Anote dúvidas, ideias, erros e observações pessoais."
               />
             </Card>
+
+            <div className="lesson-next-box">
+              <button className="primary-btn full-btn" disabled={!canFinishLesson} onClick={finishLesson}>
+                Próxima aula
+              </button>
+              {!canFinishLesson && (
+                <p className="hint-text">Para avançar, acerte a resposta principal e todas as perguntas do quiz.</p>
+              )}
+            </div>
           </section>
         )}
       </main>
     </div>
   );
-}
-
-function getPendingReview(selectedLesson, state) {
-  const previousLesson = LESSONS.find((lesson) => lesson.order === selectedLesson.order - 1);
-  if (!previousLesson) return null;
-  if (!state.completedLessons[previousLesson.id]) return null;
-  if (state.reviewStatus[previousLesson.id] === 'passed') return null;
-  return previousLesson;
 }
 
 function SimpleCodeEvaluation({ lesson, code }) {
@@ -1155,25 +1216,17 @@ function SimpleCodeEvaluation({ lesson, code }) {
     if (itemText.includes('função') || itemText.includes('function')) return normalized.includes('function') || normalized.includes('=>');
     if (itemText.includes('retornar')) return normalized.includes('return');
     if (itemText.includes('parâmetro')) return normalized.includes('(') && normalized.includes(')');
-    if (itemText.includes('botão')) return normalized.includes('button') || normalized.includes('<button');
-    if (itemText.includes('script')) return normalized.includes('script') || normalized.includes('const') || normalized.includes('function');
-    if (itemText.includes('perfil')) return normalized.includes('perfil');
     if (itemText.includes('cliente')) return normalized.includes('cliente');
-    if (itemText.includes('itens')) return normalized.includes('itens') || normalized.includes('items');
     if (itemText.includes('total')) return normalized.includes('total');
     return normalized.length >= 30;
   }).length;
 
   const ratio = lesson.codeChecklist.length ? Math.round((matches / lesson.codeChecklist.length) * 100) : 0;
-  let message = 'Adicione mais estrutura para aproximar sua resposta do exercício.';
-  if (ratio >= 100) message = 'Boa base. Sua resposta atende ao checklist essencial desta aula.';
-  else if (ratio >= 67) message = 'Está bem encaminhado. Falta refinar um ou dois pontos do checklist.';
-
   return (
     <div className="evaluation-box">
-      <strong>Avaliação simples</strong>
+      <strong>Avaliação simples do código</strong>
       <p>Checklist atendido: {matches}/{lesson.codeChecklist.length} · {ratio}%</p>
-      <p>{message}</p>
+      <p>{ratio >= 100 ? 'Boa base. Seu código atende ao mínimo esperado desta aula.' : 'Use o checklist acima para refinar a prática.'}</p>
     </div>
   );
 }
