@@ -1,12 +1,10 @@
 {
   "name": "DevAcademy ADS",
   "short_name": "DevAcademy",
-  "description": "Ferramenta real de estudo de ADS, instalável no celular e com uso offline básico.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0b1220",
-  "theme_color": "#0f172a",
-  "lang": "pt-BR",
+  "background_color": "#0a1020",
+  "theme_color": "#0a1020",
   "icons": [
     {
       "src": "/icon-192.png",
