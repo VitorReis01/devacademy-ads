@@ -1,4 +1,4 @@
-const CACHE_NAME = 'devacademy-ads-v1';
+const CACHE_NAME = 'devacademy-ads-v4';
 const APP_ASSETS = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {

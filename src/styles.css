@@ -486,3 +486,120 @@ textarea:disabled, input:disabled {
 .top-back-link:hover {
   border-color: rgba(100, 138, 225, .55);
 }
+
+
+.lesson-list {
+  display: grid;
+  gap: 12px;
+}
+.lesson-row {
+  border: 1px solid rgba(95, 126, 195, .28);
+  background: rgba(10, 18, 36, .7);
+  padding: 16px 18px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  text-align: left;
+}
+.lesson-row.locked {
+  opacity: .66;
+}
+.lesson-row-main {
+  display: grid;
+  gap: 6px;
+}
+.lesson-row-main span {
+  color: var(--muted);
+}
+.status-badge {
+  border: 1px solid rgba(95, 126, 195, .28);
+  padding: 10px 14px;
+  background: rgba(12, 21, 40, .72);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status-badge.done,
+.success-text { color: #76ebb0; }
+.status-badge.continue { color: #a9c3ff; }
+.status-badge.locked,
+.warning-text { color: #ffcf7c; }
+.back-link {
+  border: none;
+  background: transparent;
+  color: #9db8ff;
+  padding: 0;
+  margin-bottom: 14px;
+}
+.top-back-link { margin-bottom: 10px; }
+.quiz-stack,
+.option-stack {
+  display: grid;
+  gap: 12px;
+}
+.option-btn {
+  border: 1px solid rgba(95, 126, 195, .28);
+  background: rgba(10, 18, 36, .75);
+  color: var(--text);
+  padding: 14px 16px;
+  text-align: left;
+  border-radius: 16px;
+}
+.option-btn.selected {
+  border-color: rgba(120, 164, 255, .65);
+}
+.option-btn.correct {
+  border-color: rgba(68, 194, 121, .55);
+  color: #76ebb0;
+}
+.quiz-item {
+  display: grid;
+  gap: 10px;
+}
+.full-btn {
+  width: 100%;
+}
+.evaluation-box {
+  border: 1px solid rgba(95, 126, 195, .28);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: rgba(10, 18, 36, .55);
+}
+.celebration-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 8, 18, .72);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 20px;
+}
+.celebration-card {
+  max-width: 620px;
+  width: 100%;
+  background: linear-gradient(180deg, rgba(16, 28, 54, .98), rgba(11, 20, 40, .98));
+  border: 1px solid rgba(64, 92, 151, .4);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  padding: 26px;
+  display: grid;
+  gap: 16px;
+}
+@media (max-width: 760px) {
+  .topbar,
+  .lessons-toolbar,
+  .lesson-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar-actions,
+  .topbar-actions,
+  .mode-choice-grid {
+    grid-template-columns: 1fr;
+  }
+  .mode-choice-grid { display: grid; }
+  .status-badge {
+    white-space: normal;
+  }
+}
