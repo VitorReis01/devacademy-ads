@@ -999,6 +999,7 @@ function App() {
           <section className="page-section">
             <div className="lessons-toolbar">
               <div>
+                <button className="back-link top-back-link" onClick={() => patchState({ flowStep: 'mode' })}>← Voltar para escolha de modo</button>
                 <h2>Aulas</h2>
                 <p>Conclua em ordem. A próxima aula só libera após a anterior ser concluída.</p>
               </div>

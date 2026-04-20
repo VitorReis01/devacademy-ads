@@ -478,3 +478,11 @@ textarea:disabled, input:disabled {
   .pill-label { width: 100%; }
   .inline-actions { flex-direction: column; align-items: stretch; }
 }
+
+.top-back-link {
+  margin-bottom: 14px;
+}
+
+.top-back-link:hover {
+  border-color: rgba(100, 138, 225, .55);
+}
